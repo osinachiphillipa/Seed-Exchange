@@ -15,6 +15,7 @@
 (define-constant ERR-ALREADY-RATED (err u109))
 (define-constant ERR-DISPUTE-EXISTS (err u110))
 (define-constant ERR-INVALID-RESOLUTION (err u111))
+(define-constant ERR-INVALID-INPUT (err u112))
 
 ;; Order statuses
 (define-constant STATUS-ACTIVE u0)
@@ -120,6 +121,45 @@
     { amount: uint }
 )
 
+;; Input validation functions
+
+;; Validate string inputs are not empty
+(define-private (is-valid-string (input (string-ascii 1000)))
+    (> (len input) u0)
+)
+
+;; Validate uint inputs are within reasonable bounds
+(define-private (is-valid-uint (input uint) (min-val uint) (max-val uint))
+    (and (>= input min-val) (<= input max-val))
+)
+
+;; Validate listing ID exists and is valid
+(define-private (is-valid-listing-id (listing-id uint))
+    (and 
+        (> listing-id u0)
+        (< listing-id (var-get next-listing-id))
+        (is-some (map-get? seed-listings { listing-id: listing-id }))
+    )
+)
+
+;; Validate order ID exists and is valid
+(define-private (is-valid-order-id (order-id uint))
+    (and 
+        (> order-id u0)
+        (< order-id (var-get next-order-id))
+        (is-some (map-get? orders { order-id: order-id }))
+    )
+)
+
+;; Validate dispute ID exists and is valid
+(define-private (is-valid-dispute-id (dispute-id uint))
+    (and 
+        (> dispute-id u0)
+        (< dispute-id (var-get next-dispute-id))
+        (is-some (map-get? disputes { dispute-id: dispute-id }))
+    )
+)
+
 ;; Read-only functions
 
 ;; Get listing details
@@ -179,16 +219,19 @@
     (let (
         (current-stake (default-to u0 (get amount (map-get? seller-stakes { seller: tx-sender }))))
         (profile (map-get? seller-profiles { seller: tx-sender }))
+        (validated-stake-amount stake-amount) ;; Use validated input
     )
-        (asserts! (>= stake-amount (var-get min-stake-amount)) ERR-INVALID-AMOUNT)
+        ;; Input validation
+        (asserts! (is-valid-uint validated-stake-amount (var-get min-stake-amount) u1000000000000) ERR-INVALID-INPUT)
+        (asserts! (>= validated-stake-amount (var-get min-stake-amount)) ERR-INVALID-AMOUNT)
         
         ;; Transfer stake to contract
-        (try! (stx-transfer? stake-amount tx-sender (as-contract tx-sender)))
+        (try! (stx-transfer? validated-stake-amount tx-sender (as-contract tx-sender)))
         
         ;; Update stake amount
         (map-set seller-stakes
             { seller: tx-sender }
-            { amount: (+ current-stake stake-amount) }
+            { amount: (+ current-stake validated-stake-amount) }
         )
         
         ;; Create or update seller profile
@@ -196,7 +239,7 @@
             existing-profile
                 (map-set seller-profiles
                     { seller: tx-sender }
-                    (merge existing-profile { stake-amount: (+ (get stake-amount existing-profile) stake-amount) })
+                    (merge existing-profile { stake-amount: (+ (get stake-amount existing-profile) validated-stake-amount) })
                 )
             (map-set seller-profiles
                 { seller: tx-sender }
@@ -204,7 +247,7 @@
                     total-sales: u0,
                     total-ratings: u0,
                     average-rating: u0,
-                    stake-amount: stake-amount,
+                    stake-amount: validated-stake-amount,
                     reputation-score: u0,
                     joined-at: block-height
                 }
@@ -230,12 +273,31 @@
     (let (
         (listing-id (var-get next-listing-id))
         (seller-profile (map-get? seller-profiles { seller: tx-sender }))
+        ;; Validate and sanitize inputs
+        (validated-seed-type seed-type)
+        (validated-variety variety)
+        (validated-description description)
+        (validated-price price-per-unit)
+        (validated-quantity available-quantity)
+        (validated-germination germination-rate)
+        (validated-harvest-time harvest-time)
+        (validated-expires expires-in-blocks)
     )
-        ;; Validate inputs
-        (asserts! (> available-quantity u0) ERR-INVALID-AMOUNT)
-        (asserts! (> price-per-unit u0) ERR-INVALID-AMOUNT)
-        (asserts! (<= germination-rate u100) ERR-INVALID-RATING)
-        (asserts! (> expires-in-blocks u0) ERR-INVALID-AMOUNT)
+        ;; Input validation
+        (asserts! (is-valid-string validated-seed-type) ERR-INVALID-INPUT)
+        (asserts! (is-valid-string validated-variety) ERR-INVALID-INPUT)
+        (asserts! (is-valid-string validated-description) ERR-INVALID-INPUT)
+        (asserts! (is-valid-uint validated-price u1 u1000000000000) ERR-INVALID-INPUT)
+        (asserts! (is-valid-uint validated-quantity u1 u1000000000) ERR-INVALID-INPUT)
+        (asserts! (is-valid-uint validated-germination u0 u100) ERR-INVALID-INPUT)
+        (asserts! (is-valid-uint validated-harvest-time u1 u1000) ERR-INVALID-INPUT)
+        (asserts! (is-valid-uint validated-expires u1 u1000000) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
+        (asserts! (> validated-quantity u0) ERR-INVALID-AMOUNT)
+        (asserts! (> validated-price u0) ERR-INVALID-AMOUNT)
+        (asserts! (<= validated-germination u100) ERR-INVALID-RATING)
+        (asserts! (> validated-expires u0) ERR-INVALID-AMOUNT)
         (asserts! (is-some seller-profile) ERR-UNAUTHORIZED)
         
         ;; Create listing
@@ -243,16 +305,16 @@
             { listing-id: listing-id }
             {
                 seller: tx-sender,
-                seed-type: seed-type,
-                variety: variety,
-                description: description,
-                price-per-unit: price-per-unit,
-                available-quantity: available-quantity,
-                germination-rate: germination-rate,
-                harvest-time: harvest-time,
+                seed-type: validated-seed-type,
+                variety: validated-variety,
+                description: validated-description,
+                price-per-unit: validated-price,
+                available-quantity: validated-quantity,
+                germination-rate: validated-germination,
+                harvest-time: validated-harvest-time,
                 organic-certified: organic-certified,
                 created-at: block-height,
-                expires-at: (+ block-height expires-in-blocks),
+                expires-at: (+ block-height validated-expires),
                 status: STATUS-ACTIVE
             }
         )
@@ -271,17 +333,25 @@
     (shipping-address (string-ascii 200))
 )
     (let (
-        (listing (unwrap! (map-get? seed-listings { listing-id: listing-id }) ERR-NOT-FOUND))
+        (validated-listing-id listing-id)
+        (validated-quantity quantity)
+        (validated-address shipping-address)
+        (listing (unwrap! (map-get? seed-listings { listing-id: validated-listing-id }) ERR-NOT-FOUND))
         (order-id (var-get next-order-id))
-        (total-price (* (get price-per-unit listing) quantity))
+        (total-price (* (get price-per-unit listing) validated-quantity))
         (marketplace-fee (calculate-marketplace-fee total-price))
         (seller-amount (- total-price marketplace-fee))
     )
-        ;; Validate purchase
+        ;; Input validation
+        (asserts! (is-valid-listing-id validated-listing-id) ERR-INVALID-INPUT)
+        (asserts! (is-valid-uint validated-quantity u1 u1000000000) ERR-INVALID-INPUT)
+        (asserts! (is-valid-string validated-address) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
         (asserts! (is-eq (get status listing) STATUS-ACTIVE) ERR-INVALID-STATUS)
-        (asserts! (>= (get available-quantity listing) quantity) ERR-INSUFFICIENT-FUNDS)
-        (asserts! (> block-height (get expires-at listing)) ERR-EXPIRED)
-        (asserts! (> quantity u0) ERR-INVALID-AMOUNT)
+        (asserts! (>= (get available-quantity listing) validated-quantity) ERR-INSUFFICIENT-FUNDS)
+        (asserts! (< block-height (get expires-at listing)) ERR-EXPIRED)
+        (asserts! (> validated-quantity u0) ERR-INVALID-AMOUNT)
         
         ;; Transfer payment to escrow
         (try! (stx-transfer? total-price tx-sender (as-contract tx-sender)))
@@ -296,12 +366,12 @@
         (map-set orders
             { order-id: order-id }
             {
-                listing-id: listing-id,
+                listing-id: validated-listing-id,
                 buyer: tx-sender,
                 seller: (get seller listing),
-                quantity: quantity,
+                quantity: validated-quantity,
                 total-price: total-price,
-                shipping-address: shipping-address,
+                shipping-address: validated-address,
                 created-at: block-height,
                 shipped-at: none,
                 delivered-at: none,
@@ -311,10 +381,10 @@
         
         ;; Update listing quantity
         (map-set seed-listings
-            { listing-id: listing-id }
+            { listing-id: validated-listing-id }
             (merge listing { 
-                available-quantity: (- (get available-quantity listing) quantity),
-                status: (if (is-eq (- (get available-quantity listing) quantity) u0) STATUS-SOLD STATUS-ACTIVE)
+                available-quantity: (- (get available-quantity listing) validated-quantity),
+                status: (if (is-eq (- (get available-quantity listing) validated-quantity) u0) STATUS-SOLD STATUS-ACTIVE)
             })
         )
         
@@ -328,13 +398,18 @@
 ;; Mark order as shipped (seller only)
 (define-public (mark-shipped (order-id uint))
     (let (
-        (order (unwrap! (map-get? orders { order-id: order-id }) ERR-NOT-FOUND))
+        (validated-order-id order-id)
+        (order (unwrap! (map-get? orders { order-id: validated-order-id }) ERR-NOT-FOUND))
     )
+        ;; Input validation
+        (asserts! (is-valid-order-id validated-order-id) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
         (asserts! (is-eq tx-sender (get seller order)) ERR-UNAUTHORIZED)
         (asserts! (is-eq (get status order) STATUS-SOLD) ERR-INVALID-STATUS)
         
         (map-set orders
-            { order-id: order-id }
+            { order-id: validated-order-id }
             (merge order {
                 status: STATUS-SHIPPED,
                 shipped-at: (some block-height)
@@ -348,11 +423,16 @@
 ;; Confirm delivery (buyer only)
 (define-public (confirm-delivery (order-id uint))
     (let (
-        (order (unwrap! (map-get? orders { order-id: order-id }) ERR-NOT-FOUND))
-        (escrow (unwrap! (map-get? escrow-balances { order-id: order-id }) ERR-NOT-FOUND))
+        (validated-order-id order-id)
+        (order (unwrap! (map-get? orders { order-id: validated-order-id }) ERR-NOT-FOUND))
+        (escrow (unwrap! (map-get? escrow-balances { order-id: validated-order-id }) ERR-NOT-FOUND))
         (marketplace-fee (calculate-marketplace-fee (get total-price order)))
         (seller-amount (- (get total-price order) marketplace-fee))
     )
+        ;; Input validation
+        (asserts! (is-valid-order-id validated-order-id) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
         (asserts! (is-eq tx-sender (get buyer order)) ERR-UNAUTHORIZED)
         (asserts! (is-eq (get status order) STATUS-SHIPPED) ERR-INVALID-STATUS)
         
@@ -363,11 +443,11 @@
         (try! (as-contract (stx-transfer? marketplace-fee tx-sender CONTRACT-OWNER)))
         
         ;; Clear escrow
-        (map-delete escrow-balances { order-id: order-id })
+        (map-delete escrow-balances { order-id: validated-order-id })
         
         ;; Update order status
         (map-set orders
-            { order-id: order-id }
+            { order-id: validated-order-id }
             (merge order {
                 status: STATUS-DELIVERED,
                 delivered-at: (some block-height)
@@ -397,21 +477,29 @@
     (review (string-ascii 500))
 )
     (let (
-        (order (unwrap! (map-get? orders { order-id: order-id }) ERR-NOT-FOUND))
-        (existing-rating (map-get? ratings { order-id: order-id, rater: tx-sender }))
+        (validated-order-id order-id)
+        (validated-rating rating)
+        (validated-review review)
+        (order (unwrap! (map-get? orders { order-id: validated-order-id }) ERR-NOT-FOUND))
+        (existing-rating (map-get? ratings { order-id: validated-order-id, rater: tx-sender }))
     )
-        ;; Validate rating
-        (asserts! (and (>= rating u1) (<= rating u5)) ERR-INVALID-RATING)
+        ;; Input validation
+        (asserts! (is-valid-order-id validated-order-id) ERR-INVALID-INPUT)
+        (asserts! (is-valid-uint validated-rating u1 u5) ERR-INVALID-INPUT)
+        (asserts! (is-valid-string validated-review) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
+        (asserts! (and (>= validated-rating u1) (<= validated-rating u5)) ERR-INVALID-RATING)
         (asserts! (is-eq (get status order) STATUS-DELIVERED) ERR-INVALID-STATUS)
         (asserts! (or (is-eq tx-sender (get buyer order)) (is-eq tx-sender (get seller order))) ERR-UNAUTHORIZED)
         (asserts! (is-none existing-rating) ERR-ALREADY-RATED)
         
         ;; Store rating
         (map-set ratings
-            { order-id: order-id, rater: tx-sender }
+            { order-id: validated-order-id, rater: tx-sender }
             {
-                rating: rating,
-                review: review,
+                rating: validated-rating,
+                review: validated-review,
                 created-at: block-height
             }
         )
@@ -423,14 +511,14 @@
                 (current-total (get total-ratings seller-profile))
                 (current-avg (get average-rating seller-profile))
                 (new-total (+ current-total u1))
-                (new-avg (/ (+ (* current-avg current-total) (* rating u100)) new-total))
+                (new-avg (/ (+ (* current-avg current-total) (* validated-rating u100)) new-total))
             )
                 (map-set seller-profiles
                     { seller: (get seller order) }
                     (merge seller-profile {
                         total-ratings: new-total,
                         average-rating: new-avg,
-                        reputation-score: (+ (get reputation-score seller-profile) rating)
+                        reputation-score: (+ (get reputation-score seller-profile) validated-rating)
                     })
                 )
             )
@@ -448,9 +536,18 @@
     (evidence (string-ascii 1000))
 )
     (let (
-        (order (unwrap! (map-get? orders { order-id: order-id }) ERR-NOT-FOUND))
+        (validated-order-id order-id)
+        (validated-reason reason)
+        (validated-evidence evidence)
+        (order (unwrap! (map-get? orders { order-id: validated-order-id }) ERR-NOT-FOUND))
         (dispute-id (var-get next-dispute-id))
     )
+        ;; Input validation
+        (asserts! (is-valid-order-id validated-order-id) ERR-INVALID-INPUT)
+        (asserts! (is-valid-string validated-reason) ERR-INVALID-INPUT)
+        (asserts! (is-valid-string validated-evidence) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
         (asserts! (or (is-eq tx-sender (get buyer order)) (is-eq tx-sender (get seller order))) ERR-UNAUTHORIZED)
         (asserts! (not (is-eq (get status order) STATUS-DISPUTED)) ERR-DISPUTE-EXISTS)
         
@@ -458,11 +555,11 @@
         (map-set disputes
             { dispute-id: dispute-id }
             {
-                order-id: order-id,
+                order-id: validated-order-id,
                 complainant: tx-sender,
                 respondent: (if (is-eq tx-sender (get buyer order)) (get seller order) (get buyer order)),
-                reason: reason,
-                evidence: evidence,
+                reason: validated-reason,
+                evidence: validated-evidence,
                 created-at: block-height,
                 resolved-at: none,
                 resolution: none,
@@ -472,7 +569,7 @@
         
         ;; Update order status
         (map-set orders
-            { order-id: order-id }
+            { order-id: validated-order-id }
             (merge order { status: STATUS-DISPUTED })
         )
         
@@ -490,11 +587,18 @@
     (refund-to-buyer bool)
 )
     (let (
-        (dispute (unwrap! (map-get? disputes { dispute-id: dispute-id }) ERR-NOT-FOUND))
+        (validated-dispute-id dispute-id)
+        (validated-resolution resolution)
+        (dispute (unwrap! (map-get? disputes { dispute-id: validated-dispute-id }) ERR-NOT-FOUND))
         (order-id (get order-id dispute))
         (order (unwrap! (map-get? orders { order-id: order-id }) ERR-NOT-FOUND))
         (escrow (unwrap! (map-get? escrow-balances { order-id: order-id }) ERR-NOT-FOUND))
     )
+        ;; Input validation
+        (asserts! (is-valid-dispute-id validated-dispute-id) ERR-INVALID-INPUT)
+        (asserts! (is-valid-string validated-resolution) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
         (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
         (asserts! (is-none (get resolved-at dispute)) ERR-INVALID-RESOLUTION)
         
@@ -517,10 +621,10 @@
         
         ;; Update dispute
         (map-set disputes
-            { dispute-id: dispute-id }
+            { dispute-id: validated-dispute-id }
             (merge dispute {
                 resolved-at: (some block-height),
-                resolution: (some resolution),
+                resolution: (some validated-resolution),
                 resolved-by: (some tx-sender)
             })
         )
@@ -538,14 +642,19 @@
 ;; Withdraw seller stake
 (define-public (withdraw-stake (amount uint))
     (let (
+        (validated-amount amount)
         (current-stake (unwrap! (map-get? seller-stakes { seller: tx-sender }) ERR-NOT-FOUND))
-        (remaining-stake (- (get amount current-stake) amount))
+        (remaining-stake (- (get amount current-stake) validated-amount))
     )
-        (asserts! (>= (get amount current-stake) amount) ERR-INSUFFICIENT-FUNDS)
+        ;; Input validation
+        (asserts! (is-valid-uint validated-amount u1 u1000000000000) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
+        (asserts! (>= (get amount current-stake) validated-amount) ERR-INSUFFICIENT-FUNDS)
         (asserts! (>= remaining-stake (var-get min-stake-amount)) ERR-INVALID-AMOUNT)
         
         ;; Transfer stake back to seller
-        (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
+        (try! (as-contract (stx-transfer? validated-amount tx-sender tx-sender)))
         
         ;; Update stake amount
         (map-set seller-stakes
@@ -571,19 +680,33 @@
 
 ;; Update marketplace fee rate (owner only)
 (define-public (set-marketplace-fee-rate (new-rate uint))
-    (begin
+    (let (
+        (validated-rate new-rate)
+    )
+        ;; Input validation
+        (asserts! (is-valid-uint validated-rate u0 u1000) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
         (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
-        (asserts! (<= new-rate u1000) ERR-INVALID-AMOUNT) ;; Max 10%
-        (var-set marketplace-fee-rate new-rate)
+        (asserts! (<= validated-rate u1000) ERR-INVALID-AMOUNT) ;; Max 10%
+        
+        (var-set marketplace-fee-rate validated-rate)
         (ok true)
     )
 )
 
 ;; Update minimum stake amount (owner only)
 (define-public (set-min-stake-amount (new-amount uint))
-    (begin
+    (let (
+        (validated-amount new-amount)
+    )
+        ;; Input validation
+        (asserts! (is-valid-uint validated-amount u1 u1000000000000) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
         (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
-        (var-set min-stake-amount new-amount)
+        
+        (var-set min-stake-amount validated-amount)
         (ok true)
     )
 )
@@ -593,13 +716,18 @@
 ;; Cancel listing (seller only)
 (define-public (cancel-listing (listing-id uint))
     (let (
-        (listing (unwrap! (map-get? seed-listings { listing-id: listing-id }) ERR-NOT-FOUND))
+        (validated-listing-id listing-id)
+        (listing (unwrap! (map-get? seed-listings { listing-id: validated-listing-id }) ERR-NOT-FOUND))
     )
+        ;; Input validation
+        (asserts! (is-valid-listing-id validated-listing-id) ERR-INVALID-INPUT)
+        
+        ;; Business logic validation
         (asserts! (is-eq tx-sender (get seller listing)) ERR-UNAUTHORIZED)
         (asserts! (is-eq (get status listing) STATUS-ACTIVE) ERR-INVALID-STATUS)
         
         (map-set seed-listings
-            { listing-id: listing-id }
+            { listing-id: validated-listing-id }
             (merge listing { status: STATUS-CANCELLED })
         )
         
